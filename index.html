@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>GLB Viewer</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #viewer { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #e7e1d8; color: #171a19; font-family: Arial, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    .toolbar {
+      --control-size: 9px;
+      position: fixed; z-index: 3; top: 16px; left: 16px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    button, .file-label {
+      border: 0; background: transparent; color: #171a19; cursor: pointer;
+      padding: 0; font-size: var(--control-size); letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    button:hover, button:focus-visible, button.active, .file-label:hover {
+      text-decoration: underline; text-underline-offset: 3px;
+    }
+    .compass {
+      display: grid; width: 54px; height: 54px;
+      grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+      align-items: center; justify-items: center;
+    }
+    .compass button { width: 18px; height: 18px; font-size: var(--control-size); }
+    .north { grid-area: 1 / 2; }
+    .east  { grid-area: 2 / 3; }
+    .south { grid-area: 3 / 2; }
+    .west  { grid-area: 2 / 1; }
+    .modes { display: flex; height: 54px; flex-direction: column; align-items: flex-start; justify-content: space-between; }
+    .file-label { position: fixed; top: 18px; right: 18px; z-index: 3; }
+    .file-label input { display: none; }
+    .hint {
+      position: fixed; left: 18px; bottom: 16px; z-index: 3;
+      font-size: 8px; letter-spacing: .14em; pointer-events: none;
+    }
+
+    .tag-toggle {position:fixed;right:18px;top:53px;z-index:6;border:1px solid #8e8a82;padding:8px 12px;background:#e7e1d8;font-size:10px}
+    .tag-panel {position:fixed;z-index:5;right:18px;top:89px;width:min(290px,calc(100vw - 36px));max-height:calc(100vh - 110px);overflow:auto;background:#f7f4eeef;border:1px solid #bdb8ae;box-shadow:0 6px 28px #0002;padding:15px;font-size:11px}
+    .tag-panel[hidden] {display:none}
+    .tag-head {display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-weight:bold;letter-spacing:.09em}
+    .tag-row {display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #ddd7cc;cursor:pointer}
+    .tag-row input {accent-color:#262626}
+    .tag-row .swatch {width:12px;height:12px;border:1px solid #0002;flex-shrink:0}
+    .tag-row .tag-name {flex:1;overflow-wrap:anywhere}
+    .tag-row .count {color:#777;font-size:10px}
+    .tag-actions {display:flex;gap:12px;margin-bottom:8px}
+    .tag-actions button {font-size:10px}
+    .status {position:fixed;bottom:35px;left:18px;z-index:4;font-size:10px;max-width:65vw}
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="viewer"></div>
+
+  <div class="toolbar" aria-label="3D 모델 표준 시점">
+    <span class="compass" aria-label="방위별 입면">
+      <button class="north" data-view="north" aria-label="north elevation">N</button>
+      <button class="east"  data-view="east"  aria-label="east elevation">E</button>
+      <button class="south" data-view="south" aria-label="south elevation">S</button>
+      <button class="west"  data-view="west"  aria-label="west elevation">W</button>
+    </span>
+    <span class="modes">
+      <button data-view="bev">Bird's Eye View</button>
+      <button id="parallel">Parallel Projection OFF</button>
+    </span>
+  </div>
+
+  <label class="file-label">OPEN GLB<input id="file" type="file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" /></label>
+  <div id="status" role="status" style="position:fixed;left:18px;bottom:38px;font:11px Arial;z-index:4"></div>
+  <button class="tag-toggle" id="tag-toggle" aria-expanded="false">TAGS ▾</button>
+  <aside class="tag-panel" id="tag-panel" hidden><div class="tag-head">TAG VISIBILITY <span id="tag-total"></span></div><div class="tag-actions"><button id="all-on">ALL ON</button><button id="all-off">ALL OFF</button></div><div id="tag-list"></div></aside>
+  <div class="status" id="status" role="status"></div>
+  <div class="hint">3D MODEL · MIDDLE DRAG TO ORBIT · SHIFT + MIDDLE DRAG TO PAN · WHEEL TO ZOOM</div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    /* Exact control constants extracted from the WORK portfolio viewer. */
+    const MIN_POLAR_ANGLE = THREE.MathUtils.degToRad(8);
+    const MAX_POLAR_ANGLE = THREE.MathUtils.degToRad(80);
+    const host = document.querySelector("#viewer");
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xe7e1d8);
+
+    const perspective = new THREE.PerspectiveCamera(38, 1, 0.001, 1000);
+    const orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1000);
+    perspective.up.set(0, 1, 0);
+    orthographic.up.set(0, 1, 0);
+    let activeCamera = perspective;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, logarithmicDepthBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = false; // Prevent self-shadow banding on architectural slabs
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.domElement.style.touchAction = "none";
+    host.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xfff6e7, 0x6b6863, 2.2));
+    const sun = new THREE.DirectionalLight(0xffffff, 3);
+    sun.castShadow = true;
+    scene.add(sun);
+
+    let model;
+    let modelBox = null;
+    let modelMaxDimension = 4;
+    let fitDistance = 8;
+    let orthoHalfHeight = 3;
+    let transitionFrame = 0;
+    let currentObjectUrl = "";
+    const orbitHome = new THREE.Vector3();
+
+    const directions = {
+      bev:   { direction: new THREE.Vector3(1, 0.78, 1) },
+      top:   { direction: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1) },
+      north: { direction: new THREE.Vector3(0, 0, 1) },
+      east:  { direction: new THREE.Vector3(1, 0, 0) },
+      south: { direction: new THREE.Vector3(0, 0, -1) },
+      west:  { direction: new THREE.Vector3(-1, 0, 0) }
+    };
+
+    function configureControls(instance) {
+      instance.enableDamping = true;
+      instance.dampingFactor = 0.075;
+      instance.enablePan = true;
+      instance.screenSpacePanning = false;
+      instance.rotateSpeed = 0.5;
+      instance.zoomSpeed = 0.8;
+      instance.panSpeed = 0.6;
+      instance.minPolarAngle = MIN_POLAR_ANGLE;
+      instance.maxPolarAngle = MAX_POLAR_ANGLE;
+      instance.mouseButtons.LEFT = null;
+      instance.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+      instance.mouseButtons.RIGHT = null;
+      instance.touches.ONE = THREE.TOUCH.ROTATE;
+      instance.touches.TWO = THREE.TOUCH.DOLLY_PAN;
+      instance.minDistance = Math.max(modelMaxDimension * 0.3, 0.01);
+      instance.maxDistance = Math.max(modelMaxDimension * 5, fitDistance * 1.5);
+      instance.minZoom = 0.25;
+      instance.maxZoom = 4;
+      instance.target.copy(orbitHome);
+    }
+
+    let controls = new OrbitControls(activeCamera, renderer.domElement);
+    configureControls(controls);
+
+    function clampPan() {
+      const limit = modelMaxDimension * 1.5;
+      const previous = controls.target.clone();
+      controls.target.x = THREE.MathUtils.clamp(controls.target.x, orbitHome.x - limit, orbitHome.x + limit);
+      controls.target.y = THREE.MathUtils.clamp(controls.target.y, Math.max(0, orbitHome.y - limit), orbitHome.y + limit);
+      controls.target.z = THREE.MathUtils.clamp(controls.target.z, orbitHome.z - limit, orbitHome.z + limit);
+      if (!previous.equals(controls.target)) activeCamera.position.add(controls.target.clone().sub(previous));
+    }
+
+    function restoreArchitecturalOrbit() {
+      activeCamera.up.set(0, 1, 0);
+      controls.minPolarAngle = MIN_POLAR_ANGLE;
+      controls.maxPolarAngle = MAX_POLAR_ANGLE;
+    }
+
+    function bindControls() {
+      controls.addEventListener("change", clampPan);
+      controls.addEventListener("start", restoreArchitecturalOrbit);
+    }
+    function unbindControls() {
+      controls.removeEventListener("change", clampPan);
+      controls.removeEventListener("start", restoreArchitecturalOrbit);
+    }
+    bindControls();
+
+    function replaceControls(target = controls.target.clone()) {
+      unbindControls();
+      controls.dispose();
+      controls = new OrbitControls(activeCamera, renderer.domElement);
+      configureControls(controls);
+      controls.target.copy(target);
+      bindControls();
+      controls.update();
+    }
+
+    function updateProjection() {
+      const width = Math.max(host.clientWidth, 1);
+      const height = Math.max(host.clientHeight, 1);
+      const aspect = width / height;
+      perspective.aspect = aspect;
+      perspective.updateProjectionMatrix();
+      orthographic.left = -orthoHalfHeight * aspect;
+      orthographic.right = orthoHalfHeight * aspect;
+      orthographic.top = orthoHalfHeight;
+      orthographic.bottom = -orthoHalfHeight;
+      orthographic.updateProjectionMatrix();
+    }
+
+    function boxCorners(box) {
+      const { min, max } = box;
+      return [
+        new THREE.Vector3(min.x,min.y,min.z), new THREE.Vector3(min.x,min.y,max.z),
+        new THREE.Vector3(min.x,max.y,min.z), new THREE.Vector3(min.x,max.y,max.z),
+        new THREE.Vector3(max.x,min.y,min.z), new THREE.Vector3(max.x,min.y,max.z),
+        new THREE.Vector3(max.x,max.y,min.z), new THREE.Vector3(max.x,max.y,max.z)
+      ];
+    }
+
+    function calculateViewFit(rawDirection, rawUp = new THREE.Vector3(0, 1, 0)) {
+      if (!modelBox) return { distance: fitDistance, halfHeight: orthoHalfHeight };
+      const direction = rawDirection.clone().normalize();
+      const up = rawUp.clone().normalize();
+      const right = up.clone().cross(direction).normalize();
+      const screenUp = direction.clone().cross(right).normalize();
+      const aspect = Math.max(host.clientWidth / Math.max(host.clientHeight, 1), 0.01);
+      const verticalTangent = Math.tan(THREE.MathUtils.degToRad(perspective.fov) / 2);
+      const horizontalTangent = verticalTangent * aspect;
+      let distance = 0, halfHeight = 0;
+      for (const corner of boxCorners(modelBox)) {
+        const offset = corner.sub(orbitHome);
+        const horizontal = Math.abs(offset.dot(right));
+        const vertical = Math.abs(offset.dot(screenUp));
+        const depth = offset.dot(direction);
+        distance = Math.max(distance, depth + Math.max(horizontal / horizontalTangent, vertical / verticalTangent));
+        halfHeight = Math.max(halfHeight, vertical, horizontal / aspect);
+      }
+      return {
+        distance: Math.max(distance * 1.16, modelMaxDimension * 0.55),
+        halfHeight: Math.max(halfHeight * 1.14, modelMaxDimension * 0.01)
+      };
+    }
+
+    function animateView(direction, up = new THREE.Vector3(0, 1, 0), zoomFactor = 1, sharedElevationFit = false) {
+      cancelAnimationFrame(transitionFrame);
+      const normalizedDirection = direction.clone().normalize();
+      const fitted = sharedElevationFit
+        ? [directions.north.direction, directions.east.direction, directions.south.direction, directions.west.direction]
+            .map(candidate => calculateViewFit(candidate))
+            .reduce((largest, candidate) => ({
+              distance: Math.max(largest.distance, candidate.distance),
+              halfHeight: Math.max(largest.halfHeight, candidate.halfHeight)
+            }))
+        : calculateViewFit(normalizedDirection, up);
+      fitDistance = fitted.distance * zoomFactor;
+      orthoHalfHeight = fitted.halfHeight * zoomFactor;
+      updateProjection();
+      const fromPosition = activeCamera.position.clone();
+      const fromTarget = controls.target.clone();
+      const fromUp = activeCamera.up.clone();
+      const toPosition = orbitHome.clone().addScaledVector(normalizedDirection, fitDistance);
+      const start = performance.now();
+      controls.enabled = false;
+      controls.minPolarAngle = 0;
+      controls.maxPolarAngle = Math.PI / 2;
+      const tick = now => {
+        const t = Math.min(1, (now - start) / 450);
+        const eased = 1 - Math.pow(1 - t, 3);
+        activeCamera.position.lerpVectors(fromPosition, toPosition, eased);
+        activeCamera.up.lerpVectors(fromUp, up, eased).normalize();
+        controls.target.lerpVectors(fromTarget, orbitHome, eased);
+        activeCamera.lookAt(controls.target);
+        if (t < 1) transitionFrame = requestAnimationFrame(tick);
+        else {
+          activeCamera.position.copy(toPosition);
+          activeCamera.up.copy(up);
+          controls.target.copy(orbitHome);
+          activeCamera.lookAt(orbitHome);
+          controls.enabled = true;
+        }
+      };
+      transitionFrame = requestAnimationFrame(tick);
+    }
+
+    function setView(view) {
+      const preset = directions[view];
+      animateView(preset.direction.clone(), preset.up?.clone(), view === "bev" ? 2 / 3 : 1, view !== "bev" && view !== "top");
+    }
+
+    function setParallel(nextParallel) {
+      if (nextParallel === (activeCamera === orthographic)) return;
+      const oldCamera = activeCamera;
+      activeCamera = nextParallel ? orthographic : perspective;
+      activeCamera.position.copy(oldCamera.position);
+      activeCamera.quaternion.copy(oldCamera.quaternion);
+      activeCamera.up.copy(oldCamera.up);
+      activeCamera.near = oldCamera.near;
+      activeCamera.far = oldCamera.far;
+      if (activeCamera === orthographic) orthographic.zoom = 1;
+      updateProjection();
+      replaceControls(controls.target.clone());
+    }
+
+    function disposeObject(root) {
+      root.traverse(child => {
+        if (!child.isMesh) return;
+        child.geometry?.dispose();
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        materials.forEach(material => {
+          Object.values(material).forEach(value => { if (value?.isTexture) value.dispose(); });
+          material.dispose();
+        });
+      });
+    }
+
+    function fitModel(root) {
+      root.updateMatrixWorld(true);
+      const initialBox = new THREE.Box3().setFromObject(root);
+      if (initialBox.isEmpty()) return;
+      const initialCenter = initialBox.getCenter(new THREE.Vector3());
+      const initialSize = initialBox.getSize(new THREE.Vector3());
+      const architectureBox = new THREE.Box3();
+      const sample = new THREE.Vector3();
+      const architectureFloor = initialBox.min.y + initialSize.y * 0.08;
+      root.traverse(child => {
+        if (!child.isMesh) return;
+        const position = child.geometry.getAttribute("position");
+        if (!position) return;
+        const stride = Math.max(1, Math.ceil(position.count / 20000));
+        for (let i = 0; i < position.count; i += stride) {
+          sample.fromBufferAttribute(position, i).applyMatrix4(child.matrixWorld);
+          if (sample.y > architectureFloor) architectureBox.expandByPoint(sample);
+        }
+      });
+      const focusCenter = architectureBox.isEmpty() ? initialCenter : architectureBox.getCenter(new THREE.Vector3());
+      const centeredModel = new THREE.Group();
+      centeredModel.position.set(-focusCenter.x, -initialBox.min.y, -focusCenter.z);
+      scene.add(centeredModel);
+      centeredModel.add(root);
+      centeredModel.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(centeredModel);
+      const size = box.getSize(new THREE.Vector3());
+      modelBox = box.clone();
+      modelMaxDimension = Math.max(size.x, size.y, size.z, 0.001);
+      orbitHome.set(0, size.y * 0.45, 0);
+      const initialDirection = directions.bev.direction.clone().normalize();
+      const initialFit = calculateViewFit(initialDirection);
+      fitDistance = initialFit.distance * (2 / 3);
+      orthoHalfHeight = initialFit.halfHeight * (2 / 3);
+      perspective.position.copy(orbitHome).addScaledVector(initialDirection, fitDistance);
+      orthographic.position.copy(perspective.position);
+      perspective.lookAt(orbitHome);
+      orthographic.lookAt(orbitHome);
+      perspective.near = orthographic.near = Math.max(modelMaxDimension / 1000, 0.001);
+      perspective.far = orthographic.far = Math.max(modelMaxDimension * 100, 100);
+      updateProjection();
+      replaceControls(orbitHome.clone());
+      sun.position.set(modelMaxDimension * 1.5, modelMaxDimension * 2.2, modelMaxDimension * 1.2);
+      sun.shadow.camera.near = 0.01;
+      sun.shadow.camera.far = modelMaxDimension * 8;
+      sun.shadow.camera.left = sun.shadow.camera.bottom = -modelMaxDimension * 2;
+      sun.shadow.camera.right = sun.shadow.camera.top = modelMaxDimension * 2;
+      sun.shadow.camera.updateProjectionMatrix();
+    }
+
+    const tagPanel = document.querySelector('#tag-panel');
+    const tagList = document.querySelector('#tag-list');
+    const tagObjects = new Map();
+    const tagStates = new Map();
+    const status = document.querySelector('#status');
+    document.querySelector('#tag-toggle').addEventListener('click', () => {
+      tagPanel.hidden = !tagPanel.hidden;
+      document.querySelector('#tag-toggle').setAttribute('aria-expanded', String(!tagPanel.hidden));
+    });
+    function applyTagState(name, visible) {
+      tagStates.set(name, visible);
+      for (const object of tagObjects.get(name) || []) object.visible = visible;
+      const checkbox = [...tagList.querySelectorAll('input')].find(x => x.dataset.tag === name);
+      if (checkbox) checkbox.checked = visible;
+    }
+    document.querySelector('#all-on').addEventListener('click', () => { for (const name of tagObjects.keys()) applyTagState(name, true); });
+    document.querySelector('#all-off').addEventListener('click', () => { for (const name of tagObjects.keys()) applyTagState(name, false); });
+    function makeTagPanel(root) {
+      tagObjects.clear(); tagList.replaceChildren();
+      root.traverse(child => {
+        if (!child.isMesh) return;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of mats) {
+          if (!material?.name?.startsWith('LSW_TAG__')) continue;
+          const name = material.name.slice('LSW_TAG__'.length);
+          if (!tagObjects.has(name)) tagObjects.set(name, new Set());
+          tagObjects.get(name).add(child);
+        }
+      });
+      for (const [name, objects] of [...tagObjects].sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true}))) {
+        const example = [...objects][0];
+        const mats = Array.isArray(example.material) ? example.material : [example.material];
+        const mat = mats.find(m => m?.name === 'LSW_TAG__'+name);
+        const label = document.createElement('label'); label.className='tag-row';
+        const input=document.createElement('input'); input.type='checkbox'; input.checked=true; input.dataset.tag=name;
+        input.addEventListener('change',()=>applyTagState(name,input.checked));
+        const swatch=document.createElement('span'); swatch.className='swatch';
+        if (mat?.color) swatch.style.backgroundColor='#'+mat.color.getHexString();
+        const title=document.createElement('span'); title.className='tag-name'; title.textContent=name.replaceAll('_',' ');
+        const count=document.createElement('span'); count.className='count'; count.textContent=objects.size;
+        label.append(input,swatch,title,count); tagList.append(label);
+        applyTagState(name,tagStates.get(name) ?? true);
+      }
+      document.querySelector('#tag-total').textContent = tagObjects.size+' TAGS';
+      status.textContent = tagObjects.size ? '' : 'Tag materials not found in this GLB';
+    }
+
+    function load(url) {
+      document.querySelector("#status").textContent = "LOADING MODEL…";
+      status.textContent = "LOADING GLB…";
+      new GLTFLoader().load(url, gltf => {
+        if (model) { scene.remove(model.parent ?? model); disposeObject(model); }
+        model = gltf.scene;
+        model.traverse(child => {
+          if (child.isMesh) { child.castShadow = false; child.receiveShadow = false; }
+        });
+        fitModel(model);
+        makeTagPanel(model);
+        status.textContent = "";
+        document.querySelector("#status").textContent = "";
+      }, undefined, error => { console.error("GLB LOAD FAILED", error); document.querySelector("#status").textContent = "MODEL LOAD FAILED — CHECK FILE OR URL"; });
+    }
+
+    document.querySelectorAll("[data-view]").forEach(button => {
+      button.addEventListener("click", () => setView(button.dataset.view));
+    });
+    const parallelButton = document.querySelector("#parallel");
+    let parallel = false;
+    parallelButton.addEventListener("click", () => {
+      parallel = !parallel;
+      setParallel(parallel);
+      parallelButton.classList.toggle("active", parallel);
+      parallelButton.textContent = `Parallel Projection ${parallel ? "ON" : "OFF"}`;
+    });
+    document.querySelector("#file").addEventListener("change", event => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = URL.createObjectURL(file);
+      load(currentObjectUrl);
+    });
+
+    function resize() {
+      const width = host.clientWidth, height = host.clientHeight;
+      if (!width || !height) return;
+      renderer.setSize(width, height, false);
+      updateProjection();
+    }
+    new ResizeObserver(resize).observe(host);
+    resize();
+
+    function render() {
+      controls.update();
+      renderer.render(scene, activeCamera);
+      requestAnimationFrame(render);
+    }
+    render();
+    const modelParam = new URLSearchParams(location.search).get("model");
+    if (modelParam) {
+      try {
+        const url = new URL(modelParam, location.href);
+        if (url.protocol === "https:" || url.protocol === "http:") load(url.href);
+      } catch (error) { console.error(error); }
+    } else {
+      load("./LSW_SH.glb");
+    }
+  </script>
+</body>
+</html>
